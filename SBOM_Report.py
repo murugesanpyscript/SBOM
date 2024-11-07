@@ -10,9 +10,7 @@ import zipfile
 
 # Configuration:
 BLACK_DUCK_URL = "https://solidigm.app.blackduck.com"
-#API_TOKEN = 'ZmU2YmJmZjItMDJiYy00NzEzLTgwZjItMzMwZmM0NjgxY2RkOjMwN2YzYjkyLWQ2NmEtNGViMi04NTQwLTg0YjU1NjkyMjkzZQ=='
-#DEFAULT_PROJECT_NAME = 'Test1'
-#DEFAULT_VERSION = '1.0'
+
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -89,32 +87,34 @@ def get_version(bd, project, version_name=None):
         logger.error("No versions found for the project.")
         sys.exit(1)
 
-
+#create Report from version and project name
 def create_sbom_report(bd, project_id, version_id):
     """Create an SBOM report for the given project version."""
     url = f"/api/projects/{project_id}/versions/{version_id}/sbom-reports"
     
     headers = {
-        'Content-Type': 'application/vnd.blackducksoftware.report-4+json',  
         'Accept': 'application/json',          
     }
     payload = {
         "reportFormat": "JSON", 
-        "sbomType": "SPDX_22",  
+        "sbomType": "SPDX_23",  
     }
-
     try:
         response = bd.session.post(url, headers=headers, json=payload)
-
         rep_status = response.raise_for_status()
-        
 
         if response.status_code == 201:
-            try:
+            try:        
+                # Retrieve and log the Location header
+                location = response.headers.get('Location')
+                report_id = location.split("/")[-1]
+                logger.info(f"Report_id : {report_id}")
+
                 logger.info("Please Wait SBOM report generating....")
+                #waiting for creating report. If need increase more seconds
                 time.sleep(30)
-                logger.info("SBOM report created successfully.")
-                return None
+                
+                return report_id
             except requests.exceptions.JSONDecodeError:
                 logger.error("Failed to decode the response as JSON")
                 return None
@@ -134,11 +134,9 @@ def create_sbom_report(bd, project_id, version_id):
         return None  
 
 
-
-
-def get_sbom_report_list(bd, project_id: str, version_id: str):
+def get_sbom_report_name(bd, project_id: str, version_id: str, reportId: str):
     """Retrieve the list of SBOM reports for the given project version."""
-    url = f"/api/projects/{project_id}/versions/{version_id}/reports"
+    url = f"/api/projects/{project_id}/versions/{version_id}/reports/{reportId}"
     
     headers = {
         'Accept': 'application/vnd.blackducksoftware.report-4+json', 
@@ -147,71 +145,44 @@ def get_sbom_report_list(bd, project_id: str, version_id: str):
     response = bd.session.get(url, headers=headers)
     response.raise_for_status()
 
-            
-    # Log the status code for debugging purposes
-    logger.info(f"SBOM report list retrieved successfully. Status code: {response.status_code}")
-
     report_list = response.json()
     logger.debug(f"Response content: {report_list}")
     
-    reports = report_list.get('items', [])
+    reports = report_list.get("fileName")
 
-    # Log the number of reports retrieved
     logger.debug(f"Retrieved {len(reports)} SBOM reports.")
 
     return reports
 
-def download_latest_sbom_report(bd, project_id: str, version_id: str):
-    """Download the latest SBOM report for the given project version."""
-    # Step 1: Retrieve the list of SBOM reports
-    reports = get_sbom_report_list(bd, project_id, version_id)
-    
-    if not reports:
-        logger.error(f"No SBOM reports found for project {project_id}, version {version_id}.")
-        return
-
-    latest_report = max(reports, key=lambda report: report.get('createdAt', ''))
-    
-    if not latest_report:
-        logger.error("No valid 'createdAt' found for reports.")
-        return
-
-    report_id = latest_report["_meta"]["href"].split("/")[-1] 
-    if not report_id:
-        logger.error("No report ID found in the latest report.")
-        return
-    
-    logger.info(f"Latest SBOM report found: {latest_report['fileName']} (ID: {report_id})")
 
 
+def download_sbom_report(bd, project_id: str, version_id: str, report_id: str):
+    # Download the latest report
     download_url = f"/api/projects/{project_id}/versions/{version_id}/reports/{report_id}/download"
-    
+    print("Starting download...")
+
     try:
         response = bd.session.get(download_url)
-
         response.raise_for_status()
 
-        # Determine the filename to save the report
-        filename = f"sbom_{latest_report['fileName']}"
-        
-        # Save the downloaded content to a file
-        with open(filename, 'wb') as file:
-            file.write(response.content)
-        
-        logger.info(f"SBOM report downloaded successfully: {filename}")
-        return filename
-    
-    except requests.exceptions.RequestException as err:
-        logger.error(f"Error downloading SBOM report: {err}")
-        if err.response:
-            logger.error(f"Error response content: {err.response.text}")
-    
-    except Exception as e:
-        logger.error(f"Unexpected error: {e}")
-        
+        filename = get_sbom_report_name(bd, project_id, version_id, report_id)
+        logger.info(f"SBOM report created successfully. Report filename: {filename}")
+
+        if response.content:
+            with open(filename, 'wb') as file:
+                file.write(response.content)
+            print(f"Report downloaded successfully as '{filename}'.")
+            return filename
+        else:
+            print("Download failed: No content in the response.")
+
+    except requests.exceptions.HTTPError as http_err:
+        print(f"HTTP error occurred: {http_err}")
+    except Exception as err:
+        print(f"An error occurred: {err}")
     
 
-
+#extract the report and save the .Json file on current working folder
 def extract_and_flatten(zip_file_path, extract_to_folder=None):
     try:
         if extract_to_folder is None:
@@ -237,7 +208,7 @@ def extract_and_flatten(zip_file_path, extract_to_folder=None):
     except Exception as e:
         print(f"Error during extraction: {e}")
 
-
+#main funtion 
 def main():
 
     parser = argparse.ArgumentParser(description="Interact with Black Duck API.")
@@ -246,16 +217,16 @@ def main():
     parser.add_argument('--create_project', action='store_true', help='Create a new project')
     parser.add_argument('--description', help='Description for the new project')
     parser.add_argument('--version', help='Version of the project (optional)')
-    parser.add_argument('--download_report', action='store_true', help='Download latest report (optional)')
     parser.add_argument('--create_report', action='store_true',help='Create new report (optional)')
 
     args = parser.parse_args()
-
+    #connecting blackduck through API token
     bd = connect_blackduck(args.api_token)
-
+    #create new Project
     if args.create_project:
         create_project(bd, args.project_name, args.description)
     else:
+        #use exiting project 
         project, project_id = get_project(bd, args.project_name)
         if args.version:
             version = get_version(bd, project, args.version)
@@ -264,13 +235,11 @@ def main():
 
         # Create the SBOM report
         if args.create_report:
-            create_sbom_report(bd, project_id, version['id'])
-
-        # Download the SBOM report
-        if args.download_report:
-            sbom_report_file = download_latest_sbom_report(bd, project_id, version['id'])
+            report_id = create_sbom_report(bd, project_id, version['id'])
+            sbom_report_file = download_sbom_report(bd, project_id, version['id'], report_id)
             extract_and_flatten(sbom_report_file)
             os.remove(sbom_report_file)
+
 
 
 if __name__ == "__main__":
